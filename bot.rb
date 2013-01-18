@@ -23,6 +23,7 @@ description_data = ""
 File.open('description.conf').each_line{ |s|
 	description_data << s
 }
+
 description_before = description_data.match(/\*\*\*HEADER_START\*\*\*(.*)\*\*\*HEADER_END\*\*\*/mx)[1]
 description_after = description_data.match(/\*\*\*FOOTER_START\*\*\*(.*)\*\*\*FOOTER_END\*\*\*/mx)[1]
 
@@ -33,9 +34,6 @@ post_limit = config.get_value('post_limit').to_i
 parse_successful = 0
 parse_failure = 0
 invalid_title = 0
-title_format_1 = 0
-title_format_2 = 0
-title_format_3 = 0
 user_info_message = 0
 link_generated = 0
 run_again = false
@@ -48,88 +46,101 @@ days_before_actually_past = 180
 file = File.open("eventList.yaml", "rb")
 previousEvents = file.read
 
-@events = YAML::load(previousEvents)
 @invalidEvents = []
 
 reddit = Reddit::Api.new
 posts = reddit.browse(config.get_value('subreddit_name'), { :limit => post_limit })
 
+class Event
+	attr_reader :name, :location, :timeString, :time, :title, :link
+	attr_writer :name, :location, :timeString, :time, :title, :link
+	
+	def initialize(_name, _location, _timeString, _postTitle, _link)
+		@name = _name
+		@location = _location
+		@timeString = _timeString
+		@title = _postTitle
+		@link = _link
+		
+		cleanTimeString
+		
+		@time = Chronic.parse(@timeString)
+	end
+	
+	def cleanTimeString
+		@timeString = @timeString.gsub(/\,/, "")
+		@timeString = @timeString.gsub(/ to .*/, "")
+		@timeString = @timeString.gsub(/ (un)?til.*/, "")
+		@timeString = @timeString.gsub(/\-.*/, "")
+		@timeString = @timeString.gsub(/\@/, " at ")
+	end
+end
+
+def parseTitle(rawPost) 
+	parsedTitle = rawPost.title.match(/(?:\A\[([^\[\]]*)\]\s?\[([^\[\]]*)\]\s?\[([^\[\]]*)\]\s?\[([^\[\]]*)\]\s?[^\[\]]*\z)/).to_a
+	if parsedTitle != []
+		return Event.new(
+						parsedTitle[1],
+						parsedTitle[3] + ' at ' + parsedTitle[4],
+						parsedTitle[2],
+						rawPost.title,
+						rawPost.url)
+	end
+	return false
+end
+
+
+@events = YAML::load(previousEvents)
+if !@events
+	@events = {}
+end
+
 # For each post in the subreddit...
 posts.each { |post|
-	# Parse the format of the input data
-	link = post.url
-
-	# You should pretty much kill yourself before you try to understand this.
-	# It parses for [event][location][date][time] OR [event][location][date & time] OR [event][date & time] and captures the info from them.
-	# I would have loved to use /\A(?:\[([^\[\]]*)\]\s?){2,4}[^\[\]]*\z/, but apparently you can't capture while identifying repetition ({2,4} part)
-	title = post.title.match(/(?:(?:\A\[([^\[\]]*)\]\s?\[([^\[\]]*)\]\s?\[([^\[\]]*)\]\s?\[([^\[\]]*)\]\s?[^\[\]]*\z)|
-								 (?:\A\[([^\[\]]*)\]\s?\[([^\[\]]*)\]\s?\[([^\[\]]*)\]\s?[^\[\]]*\z)|
-								(?:\A\[([^\[\]]*)\]\s?\[([^\[\]]*)\]\s?[^\[\]]*\z))/).to_a
-
-	# Identify which title it is
-	if title[1] != nil
-		title_format_1 += 1
-		eventName = title[1]
-		timeString = title[3] + ' at ' + title[4]
-		locationString = title[2]
-	elsif title[5] != nil
-		title_format_2 += 1
-		eventName = title[5]
-		timeString = title[7]
-		locationString = title[6]
-	elsif title[8] != nil
-		title_format_3 += 1
-		eventName = title[8]
-		timeString = title[9]
-		locationString = "tentative"
-	end
-
-	if title.length > 0
-
+	eventData = parseTitle(post)
+	
+	if eventData
+	
 		begin
 
-			# Fix some of the formatting that commonly occurs
-			timeString = timeString.gsub(/\,/, "")
-			timeString = timeString.gsub(/ to .*/, "")
-			timeString = timeString.gsub(/ (un)?til.*/, "")
-			timeString = timeString.gsub(/\-.*/, "")
-			timeString = timeString.gsub(/\@/, " at ")
-
-			eventTime = Chronic.parse(timeString)
-			if eventTime.nil? == false
-				if(Date.today + days_before_actually_past < eventTime.to_date)
-					eventTime = Date.parse(Chronic.parse(timeString, :context => :past).to_s)
+			if eventData.time.nil? == false
+				if(Date.today + days_before_actually_past < eventData.time.to_date)
+					eventData.time = Date.parse(Chronic.parse(eventData.timeString, :context => :past).to_s)
 				end
-				date = eventTime.to_date
-
+				date = eventData.time.to_date
+				
 				# Find out if the event exists yet
 				exists = false
 				@events.each { |day|
+				
+					puts "\n\n" + day.to_s
 					day[1].each { |event|
-						if(event[5] == post.title)
+					
+						puts "\n\n" + event.to_s
+						if(event.title == eventData.title)
 							exists = true
 						end
 					}
 				}
-				# Hit up the google API to get shortened URLs
-				if(@events[date].nil? || !exists )
-					uri = URI.parse('https://www.googleapis.com/urlshortener/v1/url?key=AIzaSyCPe8jm5qxaNhIvFAWjojE-gqZRdLvb9mQ')
-					http = Net::HTTP.new(uri.host, uri.port)
-					http.use_ssl = true
-					http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-					req = Net::HTTP::Post.new(uri.path)
-					req["Content-Type"] = "application/json"
-					req.body = {"longUrl" => link, "key" => "AIzaSyCPe8jm5qxaNhIvFAWjojE-gqZRdLvb9mQ"}.to_json
-					res = http.request(req)
-					link = JSON.parse(res.body)["id"]
-					link_generated += 1
-				end
-				event = [eventName, locationString, timeString, eventTime, link, post.title]
+				
+#				# Hit up the google API to get shortened URLs
+#				if(@events[date].nil? || !exists )
+#					uri = URI.parse('https://www.googleapis.com/urlshortener/v1/url?key=AIzaSyCPe8jm5qxaNhIvFAWjojE-gqZRdLvb9mQ')
+#					http = Net::HTTP.new(uri.host, uri.port)
+#					http.use_ssl = true
+#					http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+#					req = Net::HTTP::Post.new(uri.path)
+#					req["Content-Type"] = "application/json"
+#					req.body = {"longUrl" => eventData.link, "key" => "AIzaSyCPe8jm5qxaNhIvFAWjojE-gqZRdLvb9mQ"}.to_json
+#					res = http.request(req)
+#					eventData.link = JSON.parse(res.body)["id"]
+#					link_generated += 1
+#				end
 
-				if(link != nil)
+				if(eventData.link != nil)
 					if (!exists)
 						@events[date] = [] if @events[date].nil?
-						@events[date].push event
+						@events[date].push eventData
 					end
 					parse_successful += 1
 				else
@@ -169,12 +180,8 @@ description_string << "\n\n## Upcoming Events\n\n"
 	date_formatted = date[0].strftime('%b %d')
 	date[1].each { |event|
 		if date[0] >= Date.today
-			dateString = event[3].to_time
-			if event[1] == "tentative"
-				description_string << '* [' + date_formatted + ' - ' + event[0] + ' @ ' + event[3].strftime('%l:%M%p') + '](' + event[4] + ")\n"
-			else
-				description_string << '* [' + date_formatted + ' - ' + event[0] + ' @ ' + event[1] + ' @ ' + event[3].strftime('%l:%M %p') + '](' + event[4] + ")\n"
-			end
+			dateString = event.time.to_time
+			description_string << '* [' + date_formatted + ' - ' + event.name + ' @ ' + event.location + ' @ ' + event.time.strftime('%l:%M %p') + '](' + event.link + ")\n"
 		end
 	}
 }
@@ -239,7 +246,4 @@ else
 	print invalid_title.to_s + " posts had a title that could not be parsed\n\n"
 	print user_info_message.to_s + " messages were sent to users because of an invalid title\n"
 	print link_generated.to_s + " shortened links were generated\n\n"
-	print title_format_1.to_s + " posts had the format [EVENT][LOCATION][DATE][TIME]\n"
-	print title_format_2.to_s + " posts had the format [EVENT][LOCATION][DATE & TIME]\n"
-	print title_format_3.to_s + " posts had the format [EVENT][DATE & TIME]\n"
 end

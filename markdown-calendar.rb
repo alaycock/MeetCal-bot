@@ -27,7 +27,7 @@ class MarkdownCalendar
       else
         superscript = 0
         events.each { |event|
-          cal_string << '[' + (superscript == 0 ? date.day.to_s : '^' + superscript.to_s) + '](' + event[4] + ')'
+          cal_string << '[' + (superscript == 0 ? date.day.to_s : '^' + superscript.to_s) + '](' + event.link + ')'
           superscript += 1
         }
       end
